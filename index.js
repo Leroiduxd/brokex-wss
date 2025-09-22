@@ -54,6 +54,10 @@ const PAIR_METADATA = {
   "link_usdt": { id: 2, name: "CHAINLINK" }
 };
 
+// ---- Cache des derniers résultats valides par paire ----
+const lastByPair = new Map(); // key = pair string, value = payload { id, name, ...data }
+const nowISO = () => new Date().toISOString();
+
 // WebSocket server avec compression
 const wss = new WebSocketServer({
   port: PORT,
@@ -66,24 +70,94 @@ const wss = new WebSocketServer({
   }
 });
 
-console.log(`✅ Serveur WebSocket lancé sur le port ${PORT} (update toutes les 500ms, sans auto-déconnexion).`);
+console.log(`✅ Serveur WebSocket lancé sur le port ${PORT} (refresh ~1000ms).`);
+
+// --- helpers ---
+function isValidSupraPayload(data) {
+  // On considère "valide" s'il y a au moins un instrument avec currentPrice
+  try {
+    const arr = data?.instruments;
+    return Array.isArray(arr) && arr.length > 0 && arr[0]?.currentPrice != null;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: ctrl.signal });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 // Fonction pour récupérer et diffuser tous les prix
 async function fetchAllPricesAndBroadcast() {
   try {
-    const responses = await Promise.all(PAIRS.map(pair =>
-      fetch(`${BASE_URL}/latest?trading_pair=${pair}`, {
-        headers: { 'x-api-key': API_KEY }
-      }).then(res => res.json().then(data => ({ pair, data })))
-    ));
+    const responses = await Promise.allSettled(
+      PAIRS.map(pair =>
+        fetchWithTimeout(`${BASE_URL}/latest?trading_pair=${pair}`, {
+          headers: { 'x-api-key': API_KEY }
+        }).then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          return { pair, data };
+        })
+      )
+    );
 
     const results = {};
-    for (const { pair, data } of responses) {
-      results[pair] = {
-        id: PAIR_METADATA[pair]?.id ?? null,
-        name: PAIR_METADATA[pair]?.name || "UNKNOWN",
-        ...data
-      };
+
+    for (const r of responses) {
+      if (r.status !== 'fulfilled') {
+        // requête échouée -> fallback au cache si dispo
+        const pair = r.reason?.pair || null; // pas toujours dispo
+        // on ne peut pas connaître la pair depuis reason; on passe
+        continue;
+      }
+
+      const { pair, data } = r.value;
+
+      if (isValidSupraPayload(data)) {
+        // OK: construire le payload et MAJ le cache
+        const composed = {
+          id: PAIR_METADATA[pair]?.id ?? null,
+          name: PAIR_METADATA[pair]?.name || "UNKNOWN",
+          refreshedAt: nowISO(),
+          ...data
+        };
+        lastByPair.set(pair, composed);
+        results[pair] = composed;
+      } else {
+        // payload vide / invalide -> fallback au cache
+        const cached = lastByPair.get(pair);
+        if (cached) {
+          results[pair] = { ...cached, fallback: true, servedAt: nowISO() };
+        } else {
+          // pas encore de cache: on n’envoie rien pour cette pair
+          // (optionnel) tu peux envoyer un stub si tu préfères:
+          // results[pair] = { id: PAIR_METADATA[pair]?.id ?? null, name: PAIR_METADATA[pair]?.name || "UNKNOWN", instruments: [], fallback: true }
+        }
+      }
+    }
+
+    // Inclure aussi les paires non rafraîchies mais déjà en cache (pour “toujours renvoyer quelque chose”)
+    for (const pair of PAIRS) {
+      if (!(pair in results)) {
+        const cached = lastByPair.get(pair);
+        if (cached) {
+          results[pair] = { ...cached, fallback: true, servedAt: nowISO() };
+        }
+      }
+    }
+
+    // Si on n'a strictement rien (premier tour et API down), on évite d'envoyer un payload vide
+    if (Object.keys(results).length === 0) {
+      console.warn("⚠️ Aucun résultat à diffuser (pas de cache encore disponible).");
+      return;
     }
 
     const payload = JSON.stringify(results);
@@ -94,14 +168,20 @@ async function fetchAllPricesAndBroadcast() {
       }
     });
   } catch (err) {
-    console.error("❌ Erreur récupération prix:", err.message);
+    console.error("❌ Erreur récupération/diffusion:", err.message);
   }
 }
 
-// Rafraîchissement toutes les 500 ms
+// Rafraîchissement toutes les 1000 ms
 setInterval(fetchAllPricesAndBroadcast, 1000);
 
 // Connexion client
 wss.on('connection', ws => {
   console.log("🟢 Nouveau client connecté");
+  // Envoie immédiat du cache si dispo, pour ne pas attendre 1s
+  if (lastByPair.size > 0) {
+    const snapshot = {};
+    for (const [pair, data] of lastByPair) snapshot[pair] = { ...data, servedAt: nowISO(), snapshot: true };
+    try { ws.send(JSON.stringify(snapshot)); } catch {}
+  }
 });
