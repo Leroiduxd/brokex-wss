@@ -54,6 +54,9 @@ const PAIR_METADATA = {
   link_usdt:{ id: 2,    name: 'CHAINLINK' }
 };
 
+// ✅ Ajout minimal : cache des dernières valeurs valides
+const lastValidPrices = {};
+
 // WebSocket server avec compression
 const wss = new WebSocketServer({
   port: PORT,
@@ -75,17 +78,34 @@ async function fetchAllPricesAndBroadcast() {
       PAIRS.map(pair =>
         fetch(`${BASE_URL}/latest?trading_pair=${pair}`, {
           headers: { 'x-api-key': API_KEY }
-        }).then(res => res.json().then(data => ({ pair, data })))
+        })
+          .then(res => res.json().then(data => ({ pair, data })))
+          .catch(() => ({ pair, data: null })) // si fetch plante
       )
     );
 
     const results = {};
     for (const { pair, data } of responses) {
-      results[pair] = {
-        id: PAIR_METADATA[pair]?.id ?? null,
-        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-        ...data
-      };
+      let finalData;
+
+      if (data && Object.keys(data).length > 0) {
+        // ✅ Data valide → on met à jour le cache
+        lastValidPrices[pair] = {
+          id: PAIR_METADATA[pair]?.id ?? null,
+          name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+          ...data
+        };
+        finalData = lastValidPrices[pair];
+      } else {
+        // ❌ Pas de data → on reprend cache ou 0
+        finalData = lastValidPrices[pair] || {
+          id: PAIR_METADATA[pair]?.id ?? null,
+          name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+          price: 0
+        };
+      }
+
+      results[pair] = finalData;
     }
 
     const payload = JSON.stringify(results);
@@ -107,4 +127,3 @@ setInterval(fetchAllPricesAndBroadcast, 1000);
 wss.on('connection', () => {
   console.log('🟢 Nouveau client connecté');
 });
-
