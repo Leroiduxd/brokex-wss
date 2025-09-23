@@ -10,10 +10,10 @@ const BASE_URL = 'https://prod-kline-rest.supra.com';
 const PAIRS = [
   'aapl_usd', 'amzn_usd', 'coin_usd', 'goog_usd', 'gme_usd',
   'intc_usd', 'ko_usd', 'mcd_usd', 'msft_usd', 'ibm_usd',
-  'meta_usd', 'nvda_usd', 'tsla_usd',
+  'meta_usd', 'nvda_usd', 'tsla_usd', 'orcl_usd',
   'aud_usd', 'eur_usd', 'gbp_usd', 'nzd_usd',
   'usd_cad', 'usd_chf', 'usd_jpy',
-  'xag_usd', 'xau_usd',
+  'xag_usd', 'xau_usd', 'wti_usd',
   'btc_usdt', 'eth_usdt', 'sol_usdt', 'xrp_usdt',
   'avax_usdt', 'doge_usdt', 'trx_usdt', 'ada_usdt',
   'sui_usdt', 'link_usdt'
@@ -33,6 +33,7 @@ const PAIR_METADATA = {
   meta_usd: { id: 6006, name: 'META PLATFORMS INC.' },
   nvda_usd: { id: 6002, name: 'NVIDIA CORP' },
   tsla_usd: { id: 6000, name: 'TESLA INC' },
+  orcl_usd: { id: 6038, name: 'ORACLE CORP' },
   aud_usd:  { id: 5010, name: 'AUSTRALIAN DOLLAR' },
   eur_usd:  { id: 5000, name: 'EURO' },
   gbp_usd:  { id: 5002, name: 'GREAT BRITAIN POUND' },
@@ -42,6 +43,7 @@ const PAIR_METADATA = {
   usd_jpy:  { id: 5001, name: 'JAPANESE YEN' },
   xag_usd:  { id: 5501, name: 'SILVER' },
   xau_usd:  { id: 5500, name: 'GOLD' },
+  wti_usd:  { id: 5503, name: 'CRUDE OIL WTI' },
   btc_usdt: { id: 0,    name: 'BITCOIN' },
   eth_usdt: { id: 1,    name: 'ETHEREUM' },
   sol_usdt: { id: 10,   name: 'SOLANA' },
@@ -86,7 +88,12 @@ async function fetchAllPricesAndBroadcast() {
 
     const results = {};
     for (const { pair, data } of responses) {
-      let finalData;
+      // Valeur par défaut pour garantir que la paire existe
+      let finalData = {
+        id: PAIR_METADATA[pair]?.id ?? null,
+        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+        price: 0
+      };
 
       if (data && Object.keys(data).length > 0) {
         // ✅ Data valide → on met à jour le cache
@@ -96,13 +103,9 @@ async function fetchAllPricesAndBroadcast() {
           ...data
         };
         finalData = lastValidPrices[pair];
-      } else {
-        // ❌ Pas de data → on reprend cache ou 0
-        finalData = lastValidPrices[pair] || {
-          id: PAIR_METADATA[pair]?.id ?? null,
-          name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-          price: 0
-        };
+      } else if (lastValidPrices[pair]) {
+        // ⚠️ Pas de data → on reprend cache
+        finalData = lastValidPrices[pair];
       }
 
       results[pair] = finalData;
@@ -127,3 +130,4 @@ setInterval(fetchAllPricesAndBroadcast, 1000);
 wss.on('connection', () => {
   console.log('🟢 Nouveau client connecté');
 });
+
