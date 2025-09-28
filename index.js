@@ -72,7 +72,6 @@ const PAIR_METADATA = {
  * ---------------------------
  */
 const lastValidPrices = {}; // { pair: { id, name, ...dataValide } }
-const lastUpdateTs = {};    // { pair: timestamp } — pour debug si besoin
 
 /**
  * ---------------------------
@@ -101,13 +100,39 @@ console.log(`✅ WSS prêt sur : ${PORT}
  * ---------------------------
  */
 
-// Réponse valide = contient un "price" numérique (on ignore les erreurs/pagination/etc.)
-function isValidLatestPayload(obj) {
-  return !!obj
-    && typeof obj === 'object'
-    && !Array.isArray(obj)
-    && typeof obj.price === 'number'
-    && Number.isFinite(obj.price);
+// Convertit en nombre (gère "1234.56" et "1,234.56" → 1234.56). Laisse tomber si NaN/Inf.
+function toNumberMaybe(x) {
+  if (typeof x === 'number') return Number.isFinite(x) ? x : NaN;
+  if (typeof x === 'string') {
+    // enlever séparateurs de milliers éventuels
+    const s = x.replace(/,/g, '');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return NaN;
+}
+
+// Cherche un champ prix plausible et renvoie { key, valueNumber } si trouvé
+function extractNumericPriceField(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  const candidates = ['price', 'last', 'close', 'markPrice', 'value'];
+  for (const k of candidates) {
+    if (k in obj) {
+      const n = toNumberMaybe(obj[k]);
+      if (Number.isFinite(n)) return { key: k, valueNumber: n };
+    }
+  }
+  return null;
+}
+
+// Réponse "valide" = possède un champ prix numérique ; on ne CHANGE PAS la clé (on la garde telle quelle)
+function normalizeValidPayload(obj) {
+  const hit = extractNumericPriceField(obj);
+  if (!hit) return null;
+  // Cloner sans muter l'original
+  const normalized = { ...obj };
+  normalized[hit.key] = hit.valueNumber; // forcer en nombre (décimales ok)
+  return normalized;
 }
 
 // Objet par défaut si aucune donnée encore reçue
@@ -162,42 +187,31 @@ wss.on('connection', (client) => {
 let pairIndex = 0;
 let lastCallTs = 0;
 
-// Appelle UNE paire, met à jour le cache si et seulement si la réponse est VALIDE
 async function fetchOnePairAndUpdateCache(pair) {
   try {
     const url = `${BASE_URL}/latest?trading_pair=${pair}`;
     const res = await fetch(url, { headers: { 'x-api-key': API_KEY } });
 
-    // Si rate-limit côté serveur (ex: 429), on n'écrase rien. (le scheduler gère déjà le débit)
     if (!res.ok) {
-      // Option: backoff léger si 429
-      if (res.status === 429) {
-        // On peut lire "retry-after" éventuellement
-        const ra = parseInt(res.headers.get('retry-after') || '0', 10);
-        if (ra > 0) {
-          // On attendra un peu plus avant le prochain tick (ajout soft)
-          lastCallTs = Date.now() + ra * 100; // *100 pour rester soft (tu peux mettre *1000 si nécessaire)
-        }
-      }
-      return; // ne pas écraser le cache
+      // 429, 5xx, etc. → on NE PASSE PAS en cache
+      return;
     }
 
-    const data = await res.json().catch(() => null);
+    const raw = await res.json().catch(() => null);
 
-    // N'accepte que si la charge contient un price numérique
-    if (isValidLatestPayload(data)) {
+    // On n’accepte QUE si on a un prix numérique ; sinon on ignore (on garde l’ancien)
+    const normalized = normalizeValidPayload(raw);
+    if (normalized) {
       lastValidPrices[pair] = {
         id: PAIR_METADATA[pair]?.id ?? null,
         name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-        ...data
+        ...normalized // conserve TOUTES les clés d'origine ; prix converti en number
       };
-      lastUpdateTs[pair] = Date.now();
     }
-    // Sinon: ignore (on garde l'ancienne valeur)
-  } catch (e) {
-    // Erreur réseau: on ignore (garde l'ancienne valeur)
+  } catch {
+    // Erreur réseau → on ignore (garde l’ancienne valeur)
   } finally {
-    // Initialise si jamais encore rien
+    // Si jamais on n'a toujours rien pour cette paire, init une valeur neutre (une seule fois)
     if (!lastValidPrices[pair]) {
       lastValidPrices[pair] = defaultEntry(pair);
     }
