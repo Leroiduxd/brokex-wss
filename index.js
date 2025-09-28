@@ -1,12 +1,24 @@
 import fetch from 'node-fetch';
 import { WebSocketServer } from 'ws';
 
-// Configuration
+/**
+ * ---------------------------
+ * Configuration
+ * ---------------------------
+ */
 const PORT = 8081; // Port WebSocket
 const API_KEY = '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2'; // Ta clé Supra
 const BASE_URL = 'https://prod-kline-rest.supra.com';
 
-// Liste des paires à surveiller
+const MAX_RPS = 10;                                 // plafond API (req/sec)
+const MIN_GAP_MS = Math.ceil(1000 / MAX_RPS);       // écart minimal entre 2 appels
+const BROADCAST_INTERVAL_MS = 500;                  // cadence d'envoi WSS
+
+/**
+ * ---------------------------
+ * Paires & Métadonnées
+ * ---------------------------
+ */
 const PAIRS = [
   'aapl_usd', 'amzn_usd', 'coin_usd', 'goog_usd', 'gme_usd',
   'intc_usd', 'ko_usd', 'mcd_usd', 'msft_usd', 'ibm_usd',
@@ -54,10 +66,19 @@ const PAIR_METADATA = {
   link_usdt:{ id: 2,    name: 'CHAINLINK' }
 };
 
-// ✅ Cache des dernières valeurs valides
-const lastValidPrices = {};
+/**
+ * ---------------------------
+ * Cache (dernières valeurs valides)
+ * ---------------------------
+ */
+const lastValidPrices = {}; // { pair: { id, name, ...dataValide } }
+const lastUpdateTs = {};    // { pair: timestamp } — pour debug si besoin
 
-// WebSocket server avec compression
+/**
+ * ---------------------------
+ * WebSocket Server
+ * ---------------------------
+ */
 const wss = new WebSocketServer({
   port: PORT,
   perMessageDeflate: {
@@ -69,98 +90,136 @@ const wss = new WebSocketServer({
   }
 });
 
-console.log(`✅ Serveur WebSocket lancé sur le port ${PORT}.
-- Fetch Supra: toutes les 2000ms
-- Broadcast WSS: toutes les 500ms`);
+console.log(`✅ WSS prêt sur : ${PORT}
+   - Rate limit: <= ${MAX_RPS} req/s (gap min ${MIN_GAP_MS}ms)
+   - Broadcast: ${BROADCAST_INTERVAL_MS}ms
+   - Paires: ${PAIRS.length}`);
 
-// --------- FETCH: met à jour le cache (toutes les 2s) ----------
-async function fetchAllPricesAndUpdateCache() {
-  try {
-    const responses = await Promise.all(
-      PAIRS.map(pair =>
-        fetch(`${BASE_URL}/latest?trading_pair=${pair}`, {
-          headers: { 'x-api-key': API_KEY }
-        })
-          .then(res => res.json().then(data => ({ pair, data })))
-          .catch(() => ({ pair, data: null })) // si fetch plante
-      )
-    );
+/**
+ * ---------------------------
+ * Helpers
+ * ---------------------------
+ */
 
-    for (const { pair, data } of responses) {
-      if (data && Object.keys(data).length > 0) {
-        // ✅ Data valide → on met à jour le cache
-        lastValidPrices[pair] = {
-          id: PAIR_METADATA[pair]?.id ?? null,
-          name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-          ...data
-        };
-      } else {
-        // ❌ Pas de data → on NE change PAS le cache (on garde la dernière valeur)
-        if (!lastValidPrices[pair]) {
-          // Si aucune valeur précédente, initialise une valeur neutre
-          lastValidPrices[pair] = {
-            id: PAIR_METADATA[pair]?.id ?? null,
-            name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-            price: 0
-          };
-        }
-      }
-    }
-  } catch (err) {
-    console.error('❌ Erreur récupération prix:', err.message);
-  }
+// Réponse valide = contient un "price" numérique (on ignore les erreurs/pagination/etc.)
+function isValidLatestPayload(obj) {
+  return !!obj
+    && typeof obj === 'object'
+    && !Array.isArray(obj)
+    && typeof obj.price === 'number'
+    && Number.isFinite(obj.price);
 }
 
-// --------- BROADCAST: envoie le cache (toutes les 500ms) ----------
+// Objet par défaut si aucune donnée encore reçue
+function defaultEntry(pair) {
+  return {
+    id: PAIR_METADATA[pair]?.id ?? null,
+    name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+    price: 0
+  };
+}
+
+/**
+ * ---------------------------
+ * Broadcast (toutes les 500ms)
+ * ---------------------------
+ */
 function broadcastFromCache() {
   try {
-    // Construit le payload en garantissant TOUTES les paires
     const results = {};
     for (const pair of PAIRS) {
-      if (lastValidPrices[pair]) {
-        results[pair] = lastValidPrices[pair];
-      } else {
-        // Si jamais pas encore de valeur, envoie un objet par défaut
-        results[pair] = {
-          id: PAIR_METADATA[pair]?.id ?? null,
-          name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-          price: 0
-        };
-      }
+      results[pair] = lastValidPrices[pair] ?? defaultEntry(pair);
     }
-
     const payload = JSON.stringify(results);
-
     wss.clients.forEach(client => {
-      if (client.readyState === 1) {
-        client.send(payload);
-      }
+      if (client.readyState === 1) client.send(payload);
     });
   } catch (err) {
-    console.error('❌ Erreur broadcast:', err.message);
+    console.error('❌ Erreur broadcast:', err?.message || err);
   }
 }
+setInterval(broadcastFromCache, BROADCAST_INTERVAL_MS);
 
-// Timers distincts
-setInterval(fetchAllPricesAndUpdateCache, 2000); // API Supra toutes les 2s
-setInterval(broadcastFromCache, 500);            // WSS toutes les 500ms
-
-// Connexion client
 wss.on('connection', (client) => {
-  console.log('🟢 Nouveau client connecté');
-  // Envoie un snapshot immédiat à la connexion
+  console.log('🟢 Client connecté');
+  // Snapshot immédiat
   try {
     const initial = {};
     for (const pair of PAIRS) {
-      initial[pair] = lastValidPrices[pair] ?? {
-        id: PAIR_METADATA[pair]?.id ?? null,
-        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-        price: 0
-      };
+      initial[pair] = lastValidPrices[pair] ?? defaultEntry(pair);
     }
     client.send(JSON.stringify(initial));
   } catch (e) {
-    console.error('❌ Erreur envoi snapshot initial:', e.message);
+    console.error('❌ Erreur envoi snapshot initial:', e?.message || e);
   }
 });
 
+/**
+ * ---------------------------
+ * Poller séquentiel (≤ 10 req/s)
+ * ---------------------------
+ */
+let pairIndex = 0;
+let lastCallTs = 0;
+
+// Appelle UNE paire, met à jour le cache si et seulement si la réponse est VALIDE
+async function fetchOnePairAndUpdateCache(pair) {
+  try {
+    const url = `${BASE_URL}/latest?trading_pair=${pair}`;
+    const res = await fetch(url, { headers: { 'x-api-key': API_KEY } });
+
+    // Si rate-limit côté serveur (ex: 429), on n'écrase rien. (le scheduler gère déjà le débit)
+    if (!res.ok) {
+      // Option: backoff léger si 429
+      if (res.status === 429) {
+        // On peut lire "retry-after" éventuellement
+        const ra = parseInt(res.headers.get('retry-after') || '0', 10);
+        if (ra > 0) {
+          // On attendra un peu plus avant le prochain tick (ajout soft)
+          lastCallTs = Date.now() + ra * 100; // *100 pour rester soft (tu peux mettre *1000 si nécessaire)
+        }
+      }
+      return; // ne pas écraser le cache
+    }
+
+    const data = await res.json().catch(() => null);
+
+    // N'accepte que si la charge contient un price numérique
+    if (isValidLatestPayload(data)) {
+      lastValidPrices[pair] = {
+        id: PAIR_METADATA[pair]?.id ?? null,
+        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+        ...data
+      };
+      lastUpdateTs[pair] = Date.now();
+    }
+    // Sinon: ignore (on garde l'ancienne valeur)
+  } catch (e) {
+    // Erreur réseau: on ignore (garde l'ancienne valeur)
+  } finally {
+    // Initialise si jamais encore rien
+    if (!lastValidPrices[pair]) {
+      lastValidPrices[pair] = defaultEntry(pair);
+    }
+  }
+}
+
+// Boucle séquentielle rate-limitée : 1 paire à la fois, gap >= MIN_GAP_MS
+function rateLimitedLoop() {
+  const now = Date.now();
+  const sinceLast = now - lastCallTs;
+  const wait = Math.max(0, MIN_GAP_MS - sinceLast);
+
+  setTimeout(async () => {
+    const pair = PAIRS[pairIndex];
+    await fetchOnePairAndUpdateCache(pair);
+
+    lastCallTs = Date.now();
+    pairIndex = (pairIndex + 1) % PAIRS.length;
+
+    rateLimitedLoop();
+  }, wait);
+}
+
+// Lancement du poller
+rateLimitedLoop();
