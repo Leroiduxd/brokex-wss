@@ -1,24 +1,12 @@
 import fetch from 'node-fetch';
 import { WebSocketServer } from 'ws';
 
-/**
- * ---------------------------
- * Configuration
- * ---------------------------
- */
+// Configuration
 const PORT = 8081; // Port WebSocket
 const API_KEY = '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2'; // Ta clé Supra
 const BASE_URL = 'https://prod-kline-rest.supra.com';
 
-const MAX_RPS = 10;                                 // plafond API (req/sec)
-const MIN_GAP_MS = Math.ceil(1000 / MAX_RPS);       // écart minimal entre 2 appels
-const BROADCAST_INTERVAL_MS = 500;                  // cadence d'envoi WSS
-
-/**
- * ---------------------------
- * Paires & Métadonnées
- * ---------------------------
- */
+// Liste des paires à surveiller
 const PAIRS = [
   'aapl_usd', 'amzn_usd', 'coin_usd', 'goog_usd', 'gme_usd',
   'intc_usd', 'ko_usd', 'mcd_usd', 'msft_usd', 'ibm_usd',
@@ -66,18 +54,10 @@ const PAIR_METADATA = {
   link_usdt:{ id: 2,    name: 'CHAINLINK' }
 };
 
-/**
- * ---------------------------
- * Cache (dernières valeurs valides)
- * ---------------------------
- */
-const lastValidPrices = {}; // { pair: { id, name, ...dataValide } }
+// ✅ Cache des dernières valeurs valides
+const lastValidPrices = {};
 
-/**
- * ---------------------------
- * WebSocket Server
- * ---------------------------
- */
+// WebSocket server avec compression
 const wss = new WebSocketServer({
   port: PORT,
   perMessageDeflate: {
@@ -89,53 +69,45 @@ const wss = new WebSocketServer({
   }
 });
 
-console.log(`✅ WSS prêt sur : ${PORT}
-   - Rate limit: <= ${MAX_RPS} req/s (gap min ${MIN_GAP_MS}ms)
-   - Broadcast: ${BROADCAST_INTERVAL_MS}ms
-   - Paires: ${PAIRS.length}`);
+console.log(`✅ Serveur WebSocket lancé sur le port ${PORT}.
+- Appels API: séquentiels, ≤ 10 req/s
+- Broadcast: 500ms
+- Paires: ${PAIRS.length}`);
 
-/**
- * ---------------------------
- * Helpers
- * ---------------------------
- */
-
-// Convertit en nombre (gère "1234.56" et "1,234.56" → 1234.56). Laisse tomber si NaN/Inf.
+// ---------- Helpers de validation/prix ----------
 function toNumberMaybe(x) {
   if (typeof x === 'number') return Number.isFinite(x) ? x : NaN;
   if (typeof x === 'string') {
-    // enlever séparateurs de milliers éventuels
-    const s = x.replace(/,/g, '');
+    const s = x.replace(/,/g, ''); // supprime séparateurs de milliers éventuels
     const n = parseFloat(s);
     return Number.isFinite(n) ? n : NaN;
   }
   return NaN;
 }
 
-// Cherche un champ prix plausible et renvoie { key, valueNumber } si trouvé
-function extractNumericPriceField(obj) {
+// On accepte un payload SEULEMENT s’il contient un champ prix numérique.
+// On ne change PAS le nom de la clé (même format que l’API).
+function normalizeValidPayload(obj) {
   if (!obj || typeof obj !== 'object') return null;
+
+  // Priorité au champ "price" (endpoint /latest renvoie normalement price)
   const candidates = ['price', 'last', 'close', 'markPrice', 'value'];
+  let foundKey = null;
   for (const k of candidates) {
     if (k in obj) {
       const n = toNumberMaybe(obj[k]);
-      if (Number.isFinite(n)) return { key: k, valueNumber: n };
+      if (Number.isFinite(n)) {
+        foundKey = k;
+        // clone + force number pour éviter les strings
+        const normalized = { ...obj };
+        normalized[k] = n;
+        return normalized;
+      }
     }
   }
-  return null;
+  return null; // pas de prix numérique → invalide
 }
 
-// Réponse "valide" = possède un champ prix numérique ; on ne CHANGE PAS la clé (on la garde telle quelle)
-function normalizeValidPayload(obj) {
-  const hit = extractNumericPriceField(obj);
-  if (!hit) return null;
-  // Cloner sans muter l'original
-  const normalized = { ...obj };
-  normalized[hit.key] = hit.valueNumber; // forcer en nombre (décimales ok)
-  return normalized;
-}
-
-// Objet par défaut si aucune donnée encore reçue
 function defaultEntry(pair) {
   return {
     id: PAIR_METADATA[pair]?.id ?? null,
@@ -144,15 +116,13 @@ function defaultEntry(pair) {
   };
 }
 
-/**
- * ---------------------------
- * Broadcast (toutes les 500ms)
- * ---------------------------
- */
+// ---------- Broadcast (500ms) : EXACTEMENT le même format ----------
 function broadcastFromCache() {
   try {
     const results = {};
     for (const pair of PAIRS) {
+      // Même structure que ton script original :
+      // { id, name, ...data } ; si pas de data valide encore → price:0
       results[pair] = lastValidPrices[pair] ?? defaultEntry(pair);
     }
     const payload = JSON.stringify(results);
@@ -163,62 +133,54 @@ function broadcastFromCache() {
     console.error('❌ Erreur broadcast:', err?.message || err);
   }
 }
-setInterval(broadcastFromCache, BROADCAST_INTERVAL_MS);
+setInterval(broadcastFromCache, 500);
 
-wss.on('connection', (client) => {
-  console.log('🟢 Client connecté');
-  // Snapshot immédiat
-  try {
-    const initial = {};
-    for (const pair of PAIRS) {
-      initial[pair] = lastValidPrices[pair] ?? defaultEntry(pair);
-    }
-    client.send(JSON.stringify(initial));
-  } catch (e) {
-    console.error('❌ Erreur envoi snapshot initial:', e?.message || e);
-  }
+// Connexion client (log seulement, format strictement inchangé)
+wss.on('connection', () => {
+  console.log('🟢 Nouveau client connecté');
 });
 
-/**
- * ---------------------------
- * Poller séquentiel (≤ 10 req/s)
- * ---------------------------
- */
+// ---------- Poller séquentiel (≤ 10 req/s) ----------
+const MAX_RPS = 10;
+const MIN_GAP_MS = Math.ceil(1000 / MAX_RPS); // 100ms
 let pairIndex = 0;
 let lastCallTs = 0;
 
+// Appelle UNE paire, met à jour le cache uniquement si réponse VALIDE (prix numérique)
 async function fetchOnePairAndUpdateCache(pair) {
   try {
-    const url = `${BASE_URL}/latest?trading_pair=${pair}`;
-    const res = await fetch(url, { headers: { 'x-api-key': API_KEY } });
+    const res = await fetch(`${BASE_URL}/latest?trading_pair=${pair}`, {
+      headers: { 'x-api-key': API_KEY }
+    });
 
     if (!res.ok) {
-      // 429, 5xx, etc. → on NE PASSE PAS en cache
+      // 429 / 5xx etc. → n’écrase rien
       return;
     }
 
     const raw = await res.json().catch(() => null);
-
-    // On n’accepte QUE si on a un prix numérique ; sinon on ignore (on garde l’ancien)
     const normalized = normalizeValidPayload(raw);
+
     if (normalized) {
+      // EXACTEMENT le même format que ton script : { id, name, ...data }
       lastValidPrices[pair] = {
         id: PAIR_METADATA[pair]?.id ?? null,
         name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
-        ...normalized // conserve TOUTES les clés d'origine ; prix converti en number
+        ...normalized
       };
     }
+    // sinon: ignore et garde l’ancien cache
   } catch {
-    // Erreur réseau → on ignore (garde l’ancienne valeur)
+    // erreur réseau → ignore
   } finally {
-    // Si jamais on n'a toujours rien pour cette paire, init une valeur neutre (une seule fois)
+    // Si aucune valeur jamais reçue: initialise une seule fois
     if (!lastValidPrices[pair]) {
       lastValidPrices[pair] = defaultEntry(pair);
     }
   }
 }
 
-// Boucle séquentielle rate-limitée : 1 paire à la fois, gap >= MIN_GAP_MS
+// Boucle: 1 requête à la fois, écart min 100ms (≤ 10 req/s), passe au suivant
 function rateLimitedLoop() {
   const now = Date.now();
   const sinceLast = now - lastCallTs;
@@ -237,3 +199,4 @@ function rateLimitedLoop() {
 
 // Lancement du poller
 rateLimitedLoop();
+
