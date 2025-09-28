@@ -16,7 +16,7 @@ const PAIRS = [
   'xag_usd', 'xau_usd',
   'btc_usdt', 'eth_usdt', 'sol_usdt', 'xrp_usdt',
   'avax_usdt', 'doge_usdt', 'trx_usdt', 'ada_usdt',
-  'sui_usdt', 'link_usdt'
+  'sui_usdt', 'link_usdt', 'orcle_usd', 'wti_usd'
 ];
 
 const PAIR_METADATA = {
@@ -51,7 +51,9 @@ const PAIR_METADATA = {
   trx_usdt: { id: 15,   name: 'TRON' },
   ada_usdt: { id: 16,   name: 'CARDANO' },
   sui_usdt: { id: 90,   name: 'SUI' },
-  link_usdt:{ id: 2,    name: 'CHAINLINK' }
+  link_usdt:{ id: 2,    name: 'CHAINLINK' },
+  orcle_usdt:{ id: 6038,   name: 'ORACLE CORPORATION' }, 
+  wti_usdt:{ id: 5503,    name: 'WEST TEXAS INTERMEDIATE' }
 };
 
 // ✅ Ajout minimal : cache des dernières valeurs valides
