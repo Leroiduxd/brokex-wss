@@ -52,7 +52,7 @@ const PAIR_METADATA = {
   ada_usdt: { id: 16,   name: 'CARDANO' },
   sui_usdt: { id: 90,   name: 'SUI' },
   link_usdt:{ id: 2,    name: 'CHAINLINK' },
-  orcle_usdt:{ id: 6038,   name: 'ORACLE CORPORATION' }, 
+  orcle_usd:{ id: 6038,   name: 'ORACLE CORPORATION' }, 
   wti_usdt:{ id: 5503,    name: 'WEST TEXAS INTERMEDIATE' }
 };
 
