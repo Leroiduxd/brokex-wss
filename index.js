@@ -54,7 +54,7 @@ const PAIR_METADATA = {
   link_usdt:{ id: 2,    name: 'CHAINLINK' }
 };
 
-// ✅ Ajout minimal : cache des dernières valeurs valides
+// ✅ Cache des dernières valeurs valides
 const lastValidPrices = {};
 
 // WebSocket server avec compression
@@ -69,10 +69,12 @@ const wss = new WebSocketServer({
   }
 });
 
-console.log(`✅ Serveur WebSocket lancé sur le port ${PORT} (update toutes les 1000ms).`);
+console.log(`✅ Serveur WebSocket lancé sur le port ${PORT}.
+- Fetch Supra: toutes les 2000ms
+- Broadcast WSS: toutes les 500ms`);
 
-// Fonction pour récupérer et diffuser tous les prix
-async function fetchAllPricesAndBroadcast() {
+// --------- FETCH: met à jour le cache (toutes les 2s) ----------
+async function fetchAllPricesAndUpdateCache() {
   try {
     const responses = await Promise.all(
       PAIRS.map(pair =>
@@ -84,10 +86,7 @@ async function fetchAllPricesAndBroadcast() {
       )
     );
 
-    const results = {};
     for (const { pair, data } of responses) {
-      let finalData;
-
       if (data && Object.keys(data).length > 0) {
         // ✅ Data valide → on met à jour le cache
         lastValidPrices[pair] = {
@@ -95,17 +94,39 @@ async function fetchAllPricesAndBroadcast() {
           name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
           ...data
         };
-        finalData = lastValidPrices[pair];
       } else {
-        // ❌ Pas de data → on reprend cache ou 0
-        finalData = lastValidPrices[pair] || {
+        // ❌ Pas de data → on NE change PAS le cache (on garde la dernière valeur)
+        if (!lastValidPrices[pair]) {
+          // Si aucune valeur précédente, initialise une valeur neutre
+          lastValidPrices[pair] = {
+            id: PAIR_METADATA[pair]?.id ?? null,
+            name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+            price: 0
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.error('❌ Erreur récupération prix:', err.message);
+  }
+}
+
+// --------- BROADCAST: envoie le cache (toutes les 500ms) ----------
+function broadcastFromCache() {
+  try {
+    // Construit le payload en garantissant TOUTES les paires
+    const results = {};
+    for (const pair of PAIRS) {
+      if (lastValidPrices[pair]) {
+        results[pair] = lastValidPrices[pair];
+      } else {
+        // Si jamais pas encore de valeur, envoie un objet par défaut
+        results[pair] = {
           id: PAIR_METADATA[pair]?.id ?? null,
           name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
           price: 0
         };
       }
-
-      results[pair] = finalData;
     }
 
     const payload = JSON.stringify(results);
@@ -116,16 +137,30 @@ async function fetchAllPricesAndBroadcast() {
       }
     });
   } catch (err) {
-    console.error('❌ Erreur récupération prix:', err.message);
+    console.error('❌ Erreur broadcast:', err.message);
   }
 }
 
-// Rafraîchissement toutes les 1000 ms
-setInterval(fetchAllPricesAndBroadcast, 1000);
+// Timers distincts
+setInterval(fetchAllPricesAndUpdateCache, 2000); // API Supra toutes les 2s
+setInterval(broadcastFromCache, 500);            // WSS toutes les 500ms
 
 // Connexion client
-wss.on('connection', () => {
+wss.on('connection', (client) => {
   console.log('🟢 Nouveau client connecté');
+  // Envoie un snapshot immédiat à la connexion
+  try {
+    const initial = {};
+    for (const pair of PAIRS) {
+      initial[pair] = lastValidPrices[pair] ?? {
+        id: PAIR_METADATA[pair]?.id ?? null,
+        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+        price: 0
+      };
+    }
+    client.send(JSON.stringify(initial));
+  } catch (e) {
+    console.error('❌ Erreur envoi snapshot initial:', e.message);
+  }
 });
-
 
