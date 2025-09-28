@@ -52,8 +52,9 @@ const PAIR_METADATA = {
   ada_usdt: { id: 16,   name: 'CARDANO' },
   sui_usdt: { id: 90,   name: 'SUI' },
   link_usdt:{ id: 2,    name: 'CHAINLINK' },
-  orcle_usd:{ id: 6038,   name: 'ORACLE CORPORATION' }, 
-  wti_usdt:{ id: 5503,    name: 'WEST TEXAS INTERMEDIATE' }
+  // ✅ Corrections demandées :
+  orcle_usd:{ id: 6038, name: 'ORACLE CORPORATION' },
+  wti_usd:  { id: 5503, name: 'WEST TEXAS INTERMEDIATE' }
 };
 
 // ✅ Ajout minimal : cache des dernières valeurs valides
@@ -86,7 +87,7 @@ async function fetchAllPricesAndBroadcast() {
   isFetching = true;
 
   try {
-    // 👉 Rate-limit: on remplace Promise.all par une boucle séquentielle espacé de 100ms
+    // 👉 Rate-limit: on remplace Promise.all par une boucle séquentielle espacée de 100ms
     const responses = [];
     for (const pair of PAIRS) {
       try {
