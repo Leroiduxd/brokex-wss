@@ -52,12 +52,11 @@ const PAIR_METADATA = {
   ada_usdt: { id: 16,   name: 'CARDANO' },
   sui_usdt: { id: 90,   name: 'SUI' },
   link_usdt:{ id: 2,    name: 'CHAINLINK' },
-  // ✅ Corrections demandées :
   orcle_usd:{ id: 6038, name: 'ORACLE CORPORATION' },
   wti_usd:  { id: 5503, name: 'WEST TEXAS INTERMEDIATE' }
 };
 
-// ✅ Ajout minimal : cache des dernières valeurs valides
+// ✅ Cache des dernières valeurs valides
 const lastValidPrices = {};
 
 // WebSocket server avec compression
@@ -80,6 +79,26 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Anti-reentrance pour éviter les chevauchements d'itérations
 let isFetching = false;
+
+// ⚡️ Construit un snapshot instantané (cache ou placeholders), même forme que le payload normal
+function buildInstantSnapshot() {
+  const results = {};
+  for (const pair of PAIRS) {
+    const cached = lastValidPrices[pair];
+    if (cached) {
+      results[pair] = cached;
+    } else {
+      results[pair] = {
+        id: PAIR_METADATA[pair]?.id ?? null,
+        name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
+        price: 0
+        // si ton API renvoie d'autres clés (timestamp, bid/ask, etc.),
+        // tu peux aussi les initialiser ici pour garder EXACTEMENT la même forme
+      };
+    }
+  }
+  return JSON.stringify(results);
+}
 
 // Fonction pour récupérer et diffuser tous les prix (même signature / même payload)
 async function fetchAllPricesAndBroadcast() {
@@ -116,7 +135,7 @@ async function fetchAllPricesAndBroadcast() {
         };
         finalData = lastValidPrices[pair];
       } else {
-        // ❌ Pas de data → on reprend cache ou 0
+        // ❌ Pas de data → on reprend cache ou 0 (placeholder)
         finalData = lastValidPrices[pair] || {
           id: PAIR_METADATA[pair]?.id ?? null,
           name: PAIR_METADATA[pair]?.name || 'UNKNOWN',
@@ -142,10 +161,42 @@ async function fetchAllPricesAndBroadcast() {
 }
 
 // Rafraîchissement toutes les 1000 ms (inchangé)
-setInterval(fetchAllPricesAndBroadcast, 1000);
+const interval = setInterval(fetchAllPricesAndBroadcast, 1000);
 
-// Connexion client (inchangé)
-wss.on('connection', () => {
+// 🔥 Warm-up immédiat au démarrage
+fetchAllPricesAndBroadcast().catch(() => {});
+
+// Connexion client
+wss.on('connection', (ws) => {
   console.log('🟢 Nouveau client connecté');
+
+  // 1) 🚀 Snapshot instantané (cache ou placeholders) pour un rendu immédiat
+  try {
+    ws.send(buildInstantSnapshot());
+  } catch (e) {
+    console.warn('⚠️ Impossible d\'envoyer le snapshot instantané:', e?.message);
+  }
+
+  // 2) ⚡️ Kick une collecte immédiate si aucune n'est en cours
+  if (!isFetching) {
+    fetchAllPricesAndBroadcast().catch(() => {});
+  }
+
+  // (optionnel) keep-alive ping/pong pour éviter les timeouts intermédiaires
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 });
 
+// (optionnel) Heartbeat pour fermer les connexions mortes derrière certains proxys
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, 30000);
+
+wss.on('close', () => {
+  clearInterval(interval);
+  clearInterval(heartbeat);
+});
