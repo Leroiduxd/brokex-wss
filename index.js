@@ -6,7 +6,7 @@ const PORT = 8081; // Port WebSocket
 const API_KEY = '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2'; // Ta clé Supra
 const BASE_URL = 'https://prod-kline-rest.supra.com';
 
-// Liste des paires à surveiller
+// Liste des paires à surveiller (dédupliquée + minuscules)
 const PAIRS = [
   'aapl_usd', 'amzn_usd', 'coin_usd', 'goog_usd', 'gme_usd',
   'intc_usd', 'ko_usd', 'mcd_usd', 'msft_usd', 'ibm_usd',
@@ -16,8 +16,9 @@ const PAIRS = [
   'xag_usd', 'xau_usd',
   'btc_usdt', 'eth_usdt', 'sol_usdt', 'xrp_usdt',
   'avax_usdt', 'doge_usdt', 'trx_usdt', 'ada_usdt',
-  'sui_usdt', 'link_usdt', 'orcle_usd', 'wti_usd',
-  'NIKE_USD', 'SPDIA_USD', 'QQQM_USD', 'IWM_USD' 
+  'sui_usdt', 'link_usdt',
+  'orcle_usd', 'wti_usd',
+  'nike_usd', 'spdia_usd', 'qqqm_usd', 'iwm_usd'
 ];
 
 const PAIR_METADATA = {
@@ -34,6 +35,7 @@ const PAIR_METADATA = {
   meta_usd: { id: 6006, name: 'META PLATFORMS INC.' },
   nvda_usd: { id: 6002, name: 'NVIDIA CORP' },
   tsla_usd: { id: 6000, name: 'TESLA INC' },
+
   aud_usd:  { id: 5010, name: 'AUSTRALIAN DOLLAR' },
   eur_usd:  { id: 5000, name: 'EURO' },
   gbp_usd:  { id: 5002, name: 'GREAT BRITAIN POUND' },
@@ -41,8 +43,10 @@ const PAIR_METADATA = {
   usd_cad:  { id: 5011, name: 'CANADIAN DOLLAR' },
   usd_chf:  { id: 5012, name: 'SWISS FRANC' },
   usd_jpy:  { id: 5001, name: 'JAPANESE YEN' },
+
   xag_usd:  { id: 5501, name: 'SILVER' },
   xau_usd:  { id: 5500, name: 'GOLD' },
+
   btc_usdt: { id: 0,    name: 'BITCOIN' },
   eth_usdt: { id: 1,    name: 'ETHEREUM' },
   sol_usdt: { id: 10,   name: 'SOLANA' },
@@ -53,15 +57,16 @@ const PAIR_METADATA = {
   ada_usdt: { id: 16,   name: 'CARDANO' },
   sui_usdt: { id: 90,   name: 'SUI' },
   link_usdt:{ id: 2,    name: 'CHAINLINK' },
-  orcle_usd:{ id: 6038, name: 'ORACLE CORPORATION' },
-  NIKE_USD:  { id: 6034, name: 'NIKE INC' },
-  SPDIA_USD: { id: 6113, name: 'SPDR S&P 500 ETF' },
-  QQQM_USD:  { id: 6114, name: 'NASDAQ100 ETF' },
-  IWM_USD:   { id: 6115, name: 'SPDR DOW JONES ETF' }
 
+  orcle_usd:{ id: 6038, name: 'ORACLE CORPORATION' }, // (orthographe "orcl"? à toi de voir)
+  wti_usd:  { id: 5503, name: 'WEST TEXAS INTERMEDIATE CRUDE' },
 
-
+  nike_usd: { id: 6034, name: 'NIKE INC' },
+  spdia_usd:{ id: 6113, name: 'SPDR S&P 500 ETF' },
+  qqqm_usd: { id: 6114, name: 'NASDAQ-100 ETF' },
+  iwm_usd:  { id: 6115, name: 'ISHARES RUSSELL 2000 ETF' }
 };
+
 
 // ✅ Cache des dernières valeurs valides
 const lastValidPrices = {};
