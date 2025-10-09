@@ -54,10 +54,11 @@ const PAIR_METADATA = {
   sui_usdt: { id: 90,   name: 'SUI' },
   link_usdt:{ id: 2,    name: 'CHAINLINK' },
   orcle_usd:{ id: 6038, name: 'ORACLE CORPORATION' },
-  NIKE_USD:  { id: 5503, name: 'NIKE INC' },
-  SPDIA_USD:  { id: 5503, name: 'SPDR S&P 500 ETF' },
-  QQQM_USD:  { id: 5503, name: 'Nasdaq-100 ETF' },
-  IWM_USD:  { id: 5503, name: 'TrustSPDR Dow Jones Industrial Average ETF' }
+  NIKE_USD:  { id: 6034, name: 'NIKE INC' },
+  SPDIA_USD: { id: 6113, name: 'SPDR S&P 500 ETF' },
+  QQQM_USD:  { id: 6114, name: 'NASDAQ100 ETF' },
+  IWM_USD:   { id: 6115, name: 'SPDR DOW JONES ETF' }
+
 
 
 };
