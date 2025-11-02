@@ -10,7 +10,7 @@ const WS_URL = "wss://prod-kline-ws.supra.com"; // (docs: prod-kline-ws.supra.co
 const RESOLUTION = 1;       // bar/tick fréquence côté WS
 const CHUNK_SIZE = 30;      // souscription WS par paquets
 const REFRESH_MS = 2 * 60 * 1000; // re-évalue horaires toutes les 2 min
-const MIN_GAP_MS = 100;     // 10 req/s sur REST
+const MIN_GAP_MS = 250;     // 🚨 CORRECTION: 250ms (4 req/s) pour éviter le rate-limiting
 const TZ_PARIS = "Europe/Paris";
 const TZ_NY = "America/New_York";
 
@@ -29,9 +29,10 @@ const PAIRS = [
   "nike_usd", "spdia_usd", "qqqm_usd", "iwm_usd",
 ];
 
+// Alias (tel que demandé)
 const ALIASES = { orcle_usd: "orcl_usd", nike_usd: "nke_usd", spdia_usd: "dia_usd" };
 
-const PAIR_METADATA = {
+const META = {
   aapl_usd: { id: 6004, name: "APPLE INC." },
   amzn_usd: { id: 6005, name: "AMAZON" },
   coin_usd: { id: 6010, name: "COINBASE" },
@@ -69,11 +70,11 @@ const PAIR_METADATA = {
   sui_usdt: { id: 90, name: "SUI" },
   link_usdt: { id: 2, name: "CHAINLINK" },
 
-  orcl_usd: { id: 6038, name: "ORACLE CORPORATION" },
-  dia_usd: { id: 6113, name: "SPDR DOW JONES (DIA)" },
+  orcl_usd: { id: 6038, name: "ORACLE CORPORATION" }, // alias orcle_usd
+  dia_usd: { id: 6113, name: "SPDR DOW JONES (DIA)" }, // alias spdia_usd
   qqqm_usd: { id: 6114, name: "NASDAQ-100 ETF (QQQM)" },
   iwm_usd: { id: 6115, name: "ISHARES RUSSELL 2000 ETF (IWM)" },
-  nke_usd: { id: 6034, name: "NIKE INC" },
+  nke_usd: { id: 6034, name: "NIKE INC" }, // alias nike_usd
 };
 
 // Groupes de marché
@@ -122,84 +123,140 @@ function isForexLikeOpen(d = new Date()) {
 const isCryptoOpen = () => true;
 
 // ========== CACHE & FORMATS ==========
-const lastValid = {}; // pair -> { id, name, ...data }
+const state = {}; 
+let currentWSSet = []; 
 
-// Transforme payload WS OHLC en format { id, name, price?, ...fields }
+// Initialisation de l'état
+function initCache(p) {
+  if (!state[p]) {
+    const meta = META[p] || { id: null, name: "UNKNOWN" };
+    state[p] = { id: meta.id ?? null, name: meta.name || "UNKNOWN" };
+  }
+}
+
+// 🚨 PATCH A: upsertFromWS → MAÎTRE du prix live
 function upsertFromWS(item) {
   const p = normalize(item.tradingPair || "");
   if (!p) return;
-  const meta = PAIR_METADATA[p] || { id: null, name: "UNKNOWN" };
-  const price = Number(item.currentPrice ?? item.close ?? 0);
-  lastValid[p] = {
-    id: meta.id ?? null,
-    name: meta.name || "UNKNOWN",
-    // on garde aussi open/high/low/close/timestamp (utile pour graph)
-    price,
-    open: item.open, high: item.high, low: item.low, close: item.close,
-    timestamp: item.timestamp, time: item.time,
-    tradingPair: p,
-    event: "ohlc_datafeed",
-  };
+  initCache(p);
+
+  const live = item.currentPrice ?? item.close;
+  if (live != null) state[p].wsPriceStr = String(live);
+  if (item.time != null) state[p].wsTime = String(item.time);
+  if (item.timestamp) state[p].wsTimestamp = item.timestamp;
+  
+  // Log de debug
+  if (p === "btc_usdt") console.log("[WS] BTC price ->", state[p].wsPriceStr);
 }
 
-// Pour REST /latest : on merge et essaie de déduire price
-function upsertFromREST(pair, data) {
-  const p = normalize(pair);
-  const meta = PAIR_METADATA[p] || { id: null, name: "UNKNOWN" };
-  const price = Number(
-    data?.price ?? data?.currentPrice ?? data?.close ?? data?.last ?? 0
-  );
-  lastValid[p] = {
-    id: meta.id ?? null,
-    name: meta.name || "UNKNOWN",
-    price,
-    ...data,
-  };
-}
+// 🚨 PATCH B: fetchOnceREST & fetchLatestREST → MAÎTRE des stats 24h
+const fetchLatestREST = async (p) => {
+    try {
+        const res = await fetch(`${REST_BASE}/latest?trading_pair=${p}`, { headers: { "x-api-key": API_KEY } });
+        if (!res.ok) {
+            if (res.status === 429) console.warn(`[REST] Rate limited for ${p}.`);
+            else console.warn(`[REST] Error ${res.status} for ${p}.`);
+            return null;
+        }
 
-// Snapshot envoyé aux clients — EXACTEMENT même forme que ton script précédent
-function buildSnapshot() {
-  const out = {};
-  for (const raw of PAIRS) {
-    const p = normalize(raw);
-    out[p] = lastValid[p] || {
-      id: PAIR_METADATA[p]?.id ?? null,
-      name: PAIR_METADATA[p]?.name || "UNKNOWN",
-      price: 0,
-    };
-  }
-  return JSON.stringify(out);
-}
+        const raw = await res.json().catch(() => ({}));
+        
+        // 🚨 CORRECTION CLÉ: Extraction du format paginé
+        const d = Array.isArray(raw?.instruments) ? raw.instruments[0] : null;
 
-// ========== REST FETCH (100ms spacing) ==========
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        if (!d) {
+            console.warn(`[REST] Empty data or invalid format for ${p}.`);
+            return null; 
+        }
+
+        // N'écrit que les champs REST, sans toucher à wsPriceStr
+        const rp = d?.currentPrice; // Le prix REST
+        if (rp != null) state[p].restPriceStr = String(rp);
+        if (d?.["24h_high"] != null)   state[p].h24 = String(d["24h_high"]);
+        if (d?.["24h_low"]  != null)   state[p].l24 = String(d["24h_low"]);
+        if (d?.["24h_change"] != null) state[p].ch24 = String(d["24h_change"]);
+        if (d?.timestamp) state[p].restTimestamp = d.timestamp;
+        if (d?.time != null) state[p].restTime = String(d.time);
+        
+        // Log de debug
+        if (p === "btc_usdt") console.log("[REST] BTC stats ->", {
+            h: state[p].h24, l: state[p].l24, ch: state[p].ch24, ts: state[p].restTimestamp
+        });
+        
+    } catch (e) {
+        console.error(`[REST] Fetch failed for ${p}:`, e?.message);
+    }
+};
+
 
 async function fetchOnceREST(pairs) {
   for (const raw of pairs) {
     const p = normalize(raw);
-    try {
-      const res = await fetch(`${REST_BASE}/latest?trading_pair=${p}`, {
-        headers: { "x-api-key": API_KEY },
-      });
-      const data = await res.json().catch(() => ({}));
-      upsertFromREST(p, data);
-    } catch (e) {
-      // garde cache ou placeholder
-      if (!lastValid[p]) {
-        lastValid[p] = {
-          id: PAIR_METADATA[p]?.id ?? null,
-          name: PAIR_METADATA[p]?.name || "UNKNOWN",
-          price: 0,
-        };
-      }
-    }
+    initCache(p);
+    
+    // Le patch B a été implémenté dans fetchLatestREST
+    await fetchLatestREST(p); 
+    
     await sleep(MIN_GAP_MS);
   }
 }
 
+// 🚨 PATCH C: buildSnapshot → format page + instruments, prix choisi au dernier moment
+function isPairOpen(p) {
+  return currentWSSet.includes(p); // set calculé par computeOpenSets()
+}
+
+function buildPageForPair(p) {
+  const meta = META[p] || { id: null, name: "UNKNOWN" };
+  const s = state[p] || {};
+  const open = isPairOpen(p);
+
+  // Règle de sélection du prix :
+  const price = open ? (s.wsPriceStr ?? s.restPriceStr) : (s.restPriceStr ?? s.wsPriceStr);
+  const time = s.wsTime ?? s.restTime;
+  const timestamp = s.wsTimestamp ?? s.restTimestamp;
+
+  const haveAny = price || s.h24 || s.l24 || s.ch24 || time || timestamp;
+
+  const instruments = haveAny ? [{
+    time: time ? String(time) : undefined,
+    timestamp: timestamp || undefined,
+    currentPrice: price ? String(price) : undefined,
+    "24h_high": s.h24 ?? undefined,
+    "24h_low": s.l24 ?? undefined,
+    "24h_change": s.ch24 ?? undefined,
+    tradingPair: p
+  }] : [];
+
+  // Log de debug
+  if (p === "btc_usdt") console.log("[SNAP] BTC currentPrice ->", price, "(open=", open, ")");
+
+  return {
+    id: meta.id ?? null,
+    name: meta.name || "UNKNOWN",
+    currentPage: 1,
+    totalPages: 1,
+    // totalRecords est calculé correctement par la longueur du tableau instruments
+    totalRecords: instruments.length, 
+    pageSize: 1,
+    instruments
+  };
+}
+
+function buildSnapshot() {
+  const out = {};
+  for (const raw of PAIRS) {
+    const p = normalize(raw);
+    out[p] = buildPageForPair(p);
+  }
+  return JSON.stringify(out);
+}
+// ========== FIN DES PATCHS ==========
+
+
 // ========== WS SUPRA CLIENT (dyn. resub) ==========
 let supraWS = null;
-let currentWSSet = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function chunk(arr, size) {
   const out = [];
@@ -210,11 +267,12 @@ function chunk(arr, size) {
 function openSupraWS(pairs) {
   // ferme précédente
   if (supraWS) try { supraWS.close(); } catch {}
-  currentWSSet = [...pairs];
+  currentWSSet = [...pairs]; // Important : met à jour l'état global
 
   supraWS = new WebSocket(WS_URL, { headers: { "x-api-key": API_KEY } });
 
   supraWS.on("open", () => {
+    console.log(`[SupraWS] Open. Subscribing to ${pairs.length} pairs.`);
     const groups = chunk(pairs, CHUNK_SIZE);
     for (const g of groups) {
       const msg = {
@@ -229,13 +287,26 @@ function openSupraWS(pairs) {
     try {
       const msg = JSON.parse(buf.toString());
       if (msg.event === "ohlc_datafeed" && Array.isArray(msg.payload)) {
+        
+        // 1. Mettre à jour le cache local (uniquement wsPriceStr etc.)
         for (const k of msg.payload) upsertFromWS(k);
+
+        // 2. Diffuser immédiatement le nouveau snapshot (tel que demandé)
+        const payload = buildSnapshot();
+        for (const client of wss.clients) {
+          if (client.readyState === 1) {
+            try { client.send(payload); } catch {}
+          }
+        }
       }
     } catch {}
   });
 
-  supraWS.on("error", (e) => console.error("WS error:", e?.message || e));
-  supraWS.on("close", () => {});
+  supraWS.on("error", (e) => console.error("[SupraWS] error:", e?.message || e));
+  supraWS.on("close", () => {
+    console.log("[SupraWS] closed.");
+    currentWSSet = []; // Vide le set de paires ouvertes
+  });
 }
 
 function setsDiff(a, b) {
@@ -250,37 +321,49 @@ function computeOpenSets() {
   const openCrypto = isCryptoOpen();
   const openFx = isForexLikeOpen();
   const openEq = isUsEquityOpen();
+  
+  // Log de debug
+  console.log(`[Rebalance] Flags: Crypto=${openCrypto}, FX=${openFx}, EQ=${openEq}`);
 
   const openPairs = new Set();
   const closedPairs = new Set();
 
-  // Crypto
-  for (const p of CRYPTO) (openCrypto ? openPairs : closedPairs).add(p);
-  // Forex & Commodities
-  for (const p of [...FOREX, ...COMMODITIES]) (openFx ? openPairs : closedPairs).add(p);
-  // US equities & ETFs
-  for (const p of [...US_EQ, ...US_ETF]) (openEq ? openPairs : closedPairs).add(p);
+  // Crypto (normalisées)
+  for (const p of CRYPTO) (openCrypto ? openPairs : closedPairs).add(normalize(p));
+  // Forex & Commodities (normalisées)
+  for (const p of [...FOREX, ...COMMODITIES]) (openFx ? openPairs : closedPairs).add(normalize(p));
+  // US equities & ETFs (normalisées)
+  for (const p of [...US_EQ, ...US_ETF]) (openEq ? openPairs : closedPairs).add(normalize(p));
 
   // Ajoute aussi toutes les paires restantes (normalisées)
   for (const raw of PAIRS) {
     const p = normalize(raw);
     if (!openPairs.has(p) && !closedPairs.has(p)) {
-      // inconnus → snapshot REST une fois
       closedPairs.add(p);
     }
   }
-  return { open: [...openPairs], closed: [...closedPairs], flags: { openCrypto, openFx, openEq } };
+  return { open: [...openPairs], closed: [...closedPairs] };
 }
 
 async function rebalance() {
+  console.log("[Rebalance] Evaluating market hours...");
   const { open, closed } = computeOpenSets();
 
   // (1) Re-souscrire WS si set a changé
   const { changed } = setsDiff(currentWSSet, open);
-  if (changed) openSupraWS(open);
+  if (changed) {
+    console.log(`[Rebalance] WS set changed. Re-subscribing to ${open.length} pairs.`);
+    openSupraWS(open); // Met à jour currentWSSet à l'intérieur
+  } else {
+    currentWSSet = open; // Assure que c'est synchro
+  }
 
-  // (2) Snapshot REST pour les fermés (une passe)
-  if (closed.length) await fetchOnceREST(closed);
+  // (2) Snapshot REST pour TOUTES les paires (stats 24h pour 'open', prix+stats pour 'closed')
+  const pairsToFetch = [...closed, ...open]; 
+  if (pairsToFetch.length) {
+    console.log(`[Rebalance] Fetching REST stats for ${pairsToFetch.length} pairs.`);
+    await fetchOnceREST(pairsToFetch);
+  }
 }
 
 // ========== WEBSOCKET SERVER (clients) ==========
@@ -304,7 +387,7 @@ wss.on("connection", (ws) => {
   ws.on("pong", () => { ws.isAlive = true; });
 });
 
-// diffuse un snapshot régulier (même format que ton script original)
+// diffuse un snapshot régulier (assure que les données REST sont aussi diffusées)
 setInterval(() => {
   const payload = buildSnapshot();
   for (const client of wss.clients) {
@@ -312,7 +395,7 @@ setInterval(() => {
       try { client.send(payload); } catch {}
     }
   }
-}, 1000);
+}, 1000); // Taux de rafraîchissement global (1 seconde)
 
 // heartbeat
 setInterval(() => {
@@ -325,9 +408,9 @@ setInterval(() => {
 
 // ========== BOOTSTRAP ==========
 (async () => {
-  // 1) premier calcul + snapshots fermés + ouverture WS pour ouverts
+  // 1) premier calcul + snapshots REST (pour tous) + ouverture WS pour ouverts
   await rebalance();
 
-  // 2) re-éval régulière (bascule auto marché ouvert/fermé)
+  // 2) re-éval régulière (bascule auto marché ouvert/fermé, et rafraîchit les stats 24h via REST)
   setInterval(rebalance, REFRESH_MS);
 })();
